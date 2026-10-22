@@ -42,6 +42,12 @@ export const env = {
   MONGO_URI: required('MONGO_URI'),
   REDIS_URL: required('REDIS_URL'),
   SESSION_SECRET: required('SESSION_SECRET'),
+  GOOGLE_CLIENT_ID: optional('GOOGLE_CLIENT_ID'),
+  GOOGLE_CLIENT_SECRET: optional('GOOGLE_CLIENT_SECRET'),
+  GOOGLE_CALLBACK_URL: optional('GOOGLE_CALLBACK_URL'),
+  BREVO_API_KEY: optional('BREVO_API_KEY'),
+  BREVO_SENDER_EMAIL: optional('BREVO_SENDER_EMAIL'),
+  BREVO_SENDER_NAME: optional('BREVO_SENDER_NAME'),
 };
 
 export function isCrossSiteFrontend() {

@@ -1,9 +1,10 @@
-// Express application assembly only. Domain routes are intentionally not
-// stubbed here; later slices will mount real modules after their code is ported.
+// Express application assembly. Identity routes are mounted here; additional
+// domain modules will be mounted as their implementations are ported..
 import express from 'express';
 import session from 'express-session';
 import MongoStore from 'connect-mongo';
 import cookieParser from 'cookie-parser';
+import passport from 'passport';
 import { env, isProduction, isCrossSiteFrontend } from './config/environment.js';
 import { helmetMiddleware, corsMiddleware } from './config/security.js';
 import { isDatabaseReady } from './config/database.js';
@@ -13,6 +14,7 @@ import { issueCsrfCookie, csrfProtection } from './shared/middleware/csrf.js';
 import { requestLogger } from './shared/middleware/requestLogger.js';
 import { generalApiRateLimiter } from './shared/middleware/rateLimit.js';
 import { apiResponse } from './shared/http/response.js';
+import identityRoutes from './modules/identity/routes.js';
 
 export function createApp() {
   const app = express();
@@ -40,6 +42,7 @@ export function createApp() {
       maxAge: 8 * 60 * 60 * 1000,
     },
   }));
+  app.use(passport.initialize());
 
   // Liveness is intentionally before CSRF-cookie issuance and API middleware.
   const healthHandler = (_req, res) => {
@@ -63,10 +66,20 @@ export function createApp() {
   });
 
   app.use(issueCsrfCookie);
+  // Auth/session responses must not be cached by browsers or intermediary caches.
+  app.use('/api/userAuth', (_req, res, next) => {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.set('Pragma', 'no-cache');
+    next();
+  });
+  app.use('/api/userAuth', generalApiRateLimiter, csrfProtection, identityRoutes);
   app.use('/api/v1', generalApiRateLimiter);
   app.use('/api/v1', csrfProtection);
   app.use((req, res) => apiResponse.error(res, 'NOT_FOUND', `No route for ${req.method} ${req.path}`, 404));
   app.use((err, req, res, _next) => {
+    if (err?.name === 'IdentityError' && Number.isInteger(err.status)) {
+      return apiResponse.error(res, err.code || 'IDENTITY_ERROR', err.message, err.status);
+    }
     logger.error({ error: err.message, path: req.path }, 'Unhandled request error');
     if (res.headersSent) return;
     return apiResponse.error(res, 'INTERNAL_ERROR', 'Something went wrong', 500);

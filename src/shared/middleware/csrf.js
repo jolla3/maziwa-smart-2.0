@@ -18,7 +18,10 @@ import { isAllowedOrigin } from '../../config/security.js';
 import { apiResponse } from '../http/response.js';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
-const CSRF_EXEMPT_PATHS = new Set(['/auth/signup', '/auth/login']);
+const CSRF_EXEMPT_PATHS = new Set([
+  '/auth/signup', '/auth/login',
+  '/register', '/register/seller', '/register/farmer', '/login',
+]);
 
 function ensureCsrfToken(req, res) {
   let token = req.cookies?.['csrf-token'];

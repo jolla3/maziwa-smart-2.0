@@ -1,6 +1,6 @@
 # MaziwaSmart 2.0 backend
 
-This is the first local implementation slice. It is a clean working directory, not a remote GitHub repository yet.
+This is the clean MaziwaSmart 2.0 backend. Implementation proceeds in feature branches and is promoted to main after verification.
 
 ## Source provenance
 
@@ -19,7 +19,7 @@ The MaziwaSmart 2.0 wiring added here separates Express app assembly, server sta
 
 ## Deliberately not included yet
 
-No identity routes or fake login/register handlers, Google OAuth callback, password workflows, Maziwa domain routes, marketplace routes, or Cloudinary upload code are claimed as ported in this slice. They belong in subsequent slices where we can trace their exact source behaviour and preserve their naming/contract.
+The identity slice exposes the legacy-compatible `/api/userAuth` route names using cookie sessions, including buyer/seller/farmer registration, login/logout, Google OAuth, password setup and password recovery. See `IDENTITY_INTEGRATION.md` for the exact scope and remaining integration-test requirements. Maziwa domain routes, marketplace routes and Cloudinary uploads are not yet ported.
 
 No `.env` or credentials were copied. Create your own `.env` from `.env.example` and use real service endpoints only in your local environment.
 
