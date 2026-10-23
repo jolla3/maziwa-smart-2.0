@@ -48,6 +48,11 @@ export const env = {
   BREVO_API_KEY: optional('BREVO_API_KEY'),
   BREVO_SENDER_EMAIL: optional('BREVO_SENDER_EMAIL'),
   BREVO_SENDER_NAME: optional('BREVO_SENDER_NAME'),
+  CLOUD_NAME: optional('CLOUD_NAME'),
+  CLOUD_KEY: optional('CLOUD_KEY'),
+  CLOUD_SECRET: optional('CLOUD_SECRET'),
+  /** Public product cache TTL seconds (operational default; not a product policy lock-in). */
+  PRODUCT_CACHE_TTL_SECONDS: Number.parseInt(process.env.PRODUCT_CACHE_TTL_SECONDS || '60', 10) || 60,
 };
 
 export function isCrossSiteFrontend() {

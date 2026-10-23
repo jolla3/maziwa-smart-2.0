@@ -29,7 +29,9 @@
     "@getbrevo/brevo": "^3.0.1",
     "bcryptjs": "^3.0.2",
     "passport": "^0.7.0",
-    "passport-google-oauth20": "^2.0.0"
+    "passport-google-oauth20": "^2.0.0",
+    "cloudinary": "^2.5.1",
+    "multer": "^2.4.0"
   },
   "devDependencies": {
     "jest": "^29.7.0",

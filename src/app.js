@@ -23,6 +23,8 @@ import farmFinanceRoutes from './modules/farm-finance/routes.js';
 import animalHealthRoutes from './modules/animal-health/routes.js';
 import breedingRoutes from './modules/breeding/routes.js';
 import feedRoutes from './modules/feed-management/routes.js';
+import marketplaceRoutes from './modules/livestock-marketplace/routes.js';
+import sellersRoutes from './modules/sellers/routes.js';
 import { AppError } from './shared/errors/AppError.js';
 
 export function createApp() {
@@ -92,6 +94,8 @@ export function createApp() {
   app.use('/api/v1/animal-health', animalHealthRoutes);
   app.use('/api/v1/breeding', breedingRoutes);
   app.use('/api/v1/feed', feedRoutes);
+  app.use('/api/v1/marketplace', marketplaceRoutes);
+  app.use('/api/v1/sellers', sellersRoutes);
   app.use((req, res) => apiResponse.error(res, 'NOT_FOUND', `No route for ${req.method} ${req.path}`, 404));
   app.use((err, req, res, _next) => {
     if (err?.name === 'IdentityError' && Number.isInteger(err.status)) {
