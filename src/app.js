@@ -15,6 +15,11 @@ import { requestLogger } from './shared/middleware/requestLogger.js';
 import { generalApiRateLimiter } from './shared/middleware/rateLimit.js';
 import { apiResponse } from './shared/http/response.js';
 import identityRoutes from './modules/identity/routes.js';
+import farmersRoutes from './modules/farmers/routes.js';
+import animalsRoutes from './modules/animals/routes.js';
+import milkRoutes from './modules/milk-production/routes.js';
+import farmAccessRoutes from './modules/farm-access/routes.js';
+import { AppError } from './shared/errors/AppError.js';
 
 export function createApp() {
   const app = express();
@@ -75,10 +80,17 @@ export function createApp() {
   app.use('/api/userAuth', generalApiRateLimiter, csrfProtection, identityRoutes);
   app.use('/api/v1', generalApiRateLimiter);
   app.use('/api/v1', csrfProtection);
+  app.use('/api/v1/farmers', farmersRoutes);
+  app.use('/api/v1/animals', animalsRoutes);
+  app.use('/api/v1/milk-yields', milkRoutes);
+  app.use('/api/v1/farm-access', farmAccessRoutes);
   app.use((req, res) => apiResponse.error(res, 'NOT_FOUND', `No route for ${req.method} ${req.path}`, 404));
   app.use((err, req, res, _next) => {
     if (err?.name === 'IdentityError' && Number.isInteger(err.status)) {
       return apiResponse.error(res, err.code || 'IDENTITY_ERROR', err.message, err.status);
+    }
+    if (err instanceof AppError || (err?.name === 'AppError' && Number.isInteger(err.status))) {
+      return apiResponse.error(res, err.code || 'APP_ERROR', err.message, err.status, err.details);
     }
     logger.error({ error: err.message, path: req.path }, 'Unhandled request error');
     if (res.headersSent) return;
