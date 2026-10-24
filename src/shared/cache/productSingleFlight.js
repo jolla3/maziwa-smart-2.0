@@ -1,7 +1,7 @@
 /**
  * Cross-instance public product cache-miss single-flight (Redis).
- * Adapted from CACHE_MISS_FLOW.md: SET NX lock + generation fence + bounded wait.
- * Outage behavior: fall through to loader (availability mode) — documented as degraded.
+ * CACHE_MISS_FLOW: SET NX lock + generation fence + bounded wait.
+ * Redis outage: fall through to loader (availability / degraded mode — not a newly approved policy).
  */
 import crypto from 'node:crypto';
 import { getRedisClient } from '../../config/redis.js';
@@ -51,7 +51,7 @@ export async function getOrLoadPublicProduct({ cacheKey, lockKey, genKey, loader
         const cached = await redisCall(redis.get(cacheKey));
         if (cached) return JSON.parse(cached);
         const lock = await redisCall(redis.get(lockKey));
-        if (!lock) break; // lock gone — re-enter by loading
+        if (!lock) break;
       } catch {
         break;
       }
@@ -88,14 +88,26 @@ export async function getOrLoadPublicProduct({ cacheKey, lockKey, genKey, loader
   }
 }
 
+/**
+ * After Mongo commit: INCR generation + DEL cache entry.
+ * Retries once on Redis error. Returns { ok, attempts }.
+ * Does not define a new Redis-outage product policy — failure is logged;
+ * stale bound remains TTL on any residual entry (CACHE_MISS_FLOW).
+ */
 export async function invalidatePublicProduct({ cacheKey, genKey }) {
-  try {
-    const redis = getRedisClient();
-    const multi = redis.multi();
-    multi.incr(genKey);
-    multi.del(cacheKey);
-    await redisCall(multi.exec());
-  } catch (error) {
-    logger.warn({ error: error.message }, 'product cache invalidation failed');
+  let lastError;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      const redis = getRedisClient();
+      const multi = redis.multi();
+      multi.incr(genKey);
+      multi.del(cacheKey);
+      await redisCall(multi.exec(), 500);
+      return { ok: true, attempts: attempt };
+    } catch (error) {
+      lastError = error;
+      logger.warn({ error: error.message, attempt }, 'product cache invalidation failed');
+    }
   }
+  return { ok: false, attempts: 2, error: lastError?.message };
 }

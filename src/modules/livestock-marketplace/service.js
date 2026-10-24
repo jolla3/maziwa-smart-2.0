@@ -3,10 +3,15 @@ import { toPublicAdDto, toOwnerAdDto } from './publicDto.js';
 import { publicAdCacheKey, publicAdLockKey, publicAdGenKey } from './cacheKeys.js';
 import { getOrLoadPublicProduct, invalidatePublicProduct } from '../../shared/cache/productSingleFlight.js';
 import { AppError } from '../../shared/errors/AppError.js';
-import { SellerProfile } from '../sellers/model.js';
-import { authorizeFarmAccess } from '../farm-access/service.js';
+import * as sellersService from '../sellers/service.js';
+import {
+  authorizeFarmAccess,
+  findOwnedFarmerProfile,
+  listGrantsForRecipient,
+} from '../farm-access/service.js';
 import { assertAnimalInFarm } from '../animals/service.js';
 import { destroyCloudinaryAsset } from '../../integrations/media-storage/cloudinary.js';
+import { destroyAssets, collectPublicIds } from '../../integrations/media-storage/mediaLifecycle.js';
 
 function parsePrice(value) {
   const n = typeof value === 'number' ? value : Number(value);
@@ -16,27 +21,63 @@ function parsePrice(value) {
   return n;
 }
 
-async function requireVerifiedSeller(accountId) {
-  const seller = await SellerProfile.findOne({ accountId });
-  if (!seller) {
-    throw new AppError(403, 'SELLER_PROFILE_REQUIRED', 'Create a seller profile before managing listings');
-  }
-  return seller;
+/**
+ * Publish eligibility is tied to the *acting* seller Account (authenticated actor).
+ * OWNERSHIP_AND_PERMISSIONS §6.2:
+ * - Only a verified SellerProfile may publish.
+ * - Farm delegation does not substitute for the acting seller's verification.
+ * - Seller verification does not substitute for farm authorization (checked separately).
+ */
+export async function assertVerifiedSellerForPublish(actingAccountId) {
+  return sellersService.assertVerifiedForPublish(actingAccountId);
 }
 
-async function assertCanManageAd(account, ad) {
-  if (String(ad.advertiserAccountId) === String(account._id)) return { mode: 'owner' };
-  if (ad.farmerProfileId) {
-    await authorizeFarmAccess(account, ad.farmerProfileId, 'marketplace.manage_farmer_ads');
-    return { mode: 'delegate' };
+/**
+ * Management authorization (architecture):
+ *
+ * Farm-scoped (farmerProfileId set):
+ *   - FarmerProfile owner may manage.
+ *   - Otherwise requires a *currently valid* FarmAccessGrant with exact
+ *     permission marketplace.manage_farmer_ads.
+ *   - advertiserAccountId / createdByAccountId never bypass farm checks.
+ *
+ * Independent (no farmerProfileId):
+ *   - Only advertiserAccountId may manage.
+ */
+export async function assertCanManageAd(account, ad) {
+  if (!account?._id) {
+    throw new AppError(401, 'AUTH_REQUIRED', 'Authentication required');
   }
+
+  if (ad.farmerProfileId) {
+    try {
+      const asOwner = await authorizeFarmAccess(account, ad.farmerProfileId, null);
+      if (asOwner.mode === 'owner') {
+        return { mode: 'farm_owner', farmerProfile: asOwner.farmerProfile, grant: null };
+      }
+    } catch (error) {
+      if (!(error instanceof AppError) || error.status !== 403) throw error;
+    }
+
+    const asDelegate = await authorizeFarmAccess(
+      account,
+      ad.farmerProfileId,
+      'marketplace.manage_farmer_ads',
+    );
+    return { mode: 'delegate', farmerProfile: asDelegate.farmerProfile, grant: asDelegate.grant };
+  }
+
+  if (String(ad.advertiserAccountId) === String(account._id)) {
+    return { mode: 'advertiser', farmerProfile: null, grant: null };
+  }
+
   throw new AppError(403, 'FORBIDDEN', 'You cannot manage this advertisement');
 }
 
 async function invalidateAd(adId) {
-  await invalidatePublicProduct({
-    cacheKey: publicAdCacheKey(adId),
-    genKey: publicAdGenKey(adId),
+  return invalidatePublicProduct({
+    cacheKey: publicAdCacheKey(String(adId)),
+    genKey: publicAdGenKey(String(adId)),
   });
 }
 
@@ -93,38 +134,84 @@ export async function getPublicAd(adId) {
 }
 
 export async function recordPublicView(adId, viewerAccountId = null) {
-  const ad = await LivestockAd.findById(adId);
-  if (!ad || ad.status !== 'published') {
+  // Atomic increment avoids lost updates under concurrent views.
+  const ad = await LivestockAd.findOneAndUpdate(
+    { _id: adId, status: 'published' },
+    { $inc: { viewCount: 1 } },
+    { new: true },
+  );
+  if (!ad) {
     throw new AppError(404, 'AD_NOT_FOUND', 'Advertisement not found');
   }
-  ad.viewCount = (ad.viewCount || 0) + 1;
-  await ad.save();
-  await AdViewEvent.create({
-    livestockAdId: ad._id,
-    viewerAccountId: viewerAccountId || undefined,
-  });
-  await invalidateAd(ad._id);
-  return { viewCount: ad.viewCount };
+
+  let eventRecorded = true;
+  try {
+    await AdViewEvent.create({
+      livestockAdId: ad._id,
+      viewerAccountId: viewerAccountId || undefined,
+    });
+  } catch (error) {
+    eventRecorded = false;
+    // Count already committed; still invalidate so cached DTO is not permanently stale.
+    const { logger } = await import('../../config/logger.js');
+    logger.warn({ error: error.message, adId: String(ad._id) }, 'AdViewEvent create failed after viewCount increment');
+  }
+
+  const invalidation = await invalidateAd(ad._id);
+  return {
+    viewCount: ad.viewCount,
+    eventRecorded,
+    cacheInvalidated: invalidation?.ok !== false,
+  };
 }
 
+/**
+ * List ads the actor can manage *now*.
+ * Candidate query is bounded; each candidate is re-authorized via assertCanManageAd.
+ */
 export async function listMyAds(account, query = {}) {
-  const filter = { advertiserAccountId: account._id };
+  const ownedFarm = await findOwnedFarmerProfile(account._id);
+  const grants = await listGrantsForRecipient(account);
+  const managedFarmIds = [];
+  for (const g of grants) {
+    if (g.status !== 'active') continue;
+    if (g.expiresAt && g.expiresAt.getTime() <= Date.now()) continue;
+    if (!Array.isArray(g.permissions) || !g.permissions.includes('marketplace.manage_farmer_ads')) continue;
+    managedFarmIds.push(g.farmerProfileId);
+  }
+
+  const orClauses = [
+    // Independent ads (no farm scope) owned by this advertiser
+    {
+      advertiserAccountId: account._id,
+      $or: [{ farmerProfileId: null }, { farmerProfileId: { $exists: false } }],
+    },
+  ];
+  if (ownedFarm) {
+    orClauses.push({ farmerProfileId: ownedFarm._id });
+  }
+  if (managedFarmIds.length) {
+    orClauses.push({ farmerProfileId: { $in: managedFarmIds } });
+  }
+
+  const filter = { $or: orClauses };
   if (query.status && AD_STATUSES.includes(query.status)) filter.status = query.status;
+
   const rows = await LivestockAd.find(filter).sort({ updatedAt: -1 }).limit(200);
-  return rows.map(toOwnerAdDto);
+
+  const visible = [];
+  for (const ad of rows) {
+    try {
+      await assertCanManageAd(account, ad);
+      visible.push(toOwnerAdDto(ad));
+    } catch (error) {
+      if (!(error instanceof AppError) || error.status !== 403) throw error;
+    }
+  }
+  return visible;
 }
 
 export async function createAd(account, input = {}, imageMeta = []) {
-  // Seller profile required for any listing; verification required only to publish.
-  let seller = await SellerProfile.findOne({ accountId: account._id });
-  if (!seller) {
-    seller = await SellerProfile.create({
-      accountId: account._id,
-      verificationStatus: 'pending',
-      submittedAt: new Date(),
-    });
-  }
-
   const title = typeof input.title === 'string' ? input.title.trim() : '';
   if (!title) throw new AppError(400, 'TITLE_REQUIRED', 'title is required');
 
@@ -135,26 +222,33 @@ export async function createAd(account, input = {}, imageMeta = []) {
 
   let farmerProfileId = input.farmerProfileId || undefined;
   let animalId = input.animalId || undefined;
+  const advertiserAccountId = account._id;
+  const createdByAccountId = account._id;
 
-  if (animalId) {
-    if (!farmerProfileId) {
+  if (animalId || farmerProfileId) {
+    if (animalId && !farmerProfileId) {
       throw new AppError(400, 'FARMER_SCOPE_REQUIRED', 'farmerProfileId is required when animalId is set');
     }
-    // Owner of farm or marketplace.manage_farmer_ads
+    let access;
     try {
-      await authorizeFarmAccess(account, farmerProfileId, null);
-    } catch {
-      await authorizeFarmAccess(account, farmerProfileId, 'marketplace.manage_farmer_ads');
+      access = await authorizeFarmAccess(account, farmerProfileId, null);
+    } catch (error) {
+      if (!(error instanceof AppError) || error.status !== 403) throw error;
+      access = await authorizeFarmAccess(account, farmerProfileId, 'marketplace.manage_farmer_ads');
     }
-    await assertAnimalInFarm(animalId, farmerProfileId);
+    farmerProfileId = access.farmerProfile._id;
+    if (animalId) {
+      await assertAnimalInFarm(animalId, farmerProfileId);
+    }
   }
+
+  // Ensure seller profile via sellers module public API (no private model import).
+  await sellersService.ensureSellerProfile({ _id: advertiserAccountId });
 
   const status = input.publish === true || input.status === 'published' ? 'published' : 'draft';
   if (status === 'published') {
-    const seller = await requireVerifiedSeller(account._id);
-    if (seller.verificationStatus !== 'verified') {
-      throw new AppError(403, 'SELLER_NOT_VERIFIED', 'Seller must be verified before publishing listings');
-    }
+    // Acting seller must be verified (§6.2). advertiserAccountId is set to actor on create.
+    await assertVerifiedSellerForPublish(account._id);
     if (!imageMeta.length && !(input.images && input.images.length)) {
       throw new AppError(400, 'IMAGES_REQUIRED', 'At least one image is required to publish');
     }
@@ -163,7 +257,8 @@ export async function createAd(account, input = {}, imageMeta = []) {
   const images = imageMeta.length ? imageMeta : (Array.isArray(input.images) ? input.images : []);
 
   const ad = await LivestockAd.create({
-    advertiserAccountId: account._id,
+    advertiserAccountId,
+    createdByAccountId,
     farmerProfileId,
     animalId,
     title,
@@ -193,6 +288,19 @@ export async function updateAd(account, adId, input = {}, imageMeta = []) {
   }
   await assertCanManageAd(account, ad);
 
+  let pendingDestroyIds = [];
+
+  // Refuse ownership-transfer style field changes via update.
+  if (input.farmerProfileId !== undefined && String(input.farmerProfileId || '') !== String(ad.farmerProfileId || '')) {
+    throw new AppError(400, 'FARM_SCOPE_IMMUTABLE', 'Cannot change farmerProfileId on an existing advertisement');
+  }
+  if (input.animalId !== undefined && String(input.animalId || '') !== String(ad.animalId || '')) {
+    throw new AppError(400, 'ANIMAL_IMMUTABLE', 'Cannot change animalId on an existing advertisement');
+  }
+  if (input.advertiserAccountId !== undefined && String(input.advertiserAccountId) !== String(ad.advertiserAccountId)) {
+    throw new AppError(400, 'ADVERTISER_IMMUTABLE', 'Cannot change advertiserAccountId on an existing advertisement');
+  }
+
   if (input.title !== undefined) {
     const title = String(input.title).trim();
     if (!title) throw new AppError(400, 'TITLE_REQUIRED', 'title cannot be empty');
@@ -217,12 +325,10 @@ export async function updateAd(account, adId, input = {}, imageMeta = []) {
     };
   }
 
+  // Defer Cloudinary deletes until AFTER successful save.
   if (imageMeta.length) {
-    // Append new uploads; optional replaceAll
     if (input.replaceImages === true || input.replaceImages === 'true') {
-      for (const img of ad.images || []) {
-        if (img.publicId) await destroyCloudinaryAsset(img.publicId).catch(() => {});
-      }
+      pendingDestroyIds = (ad.images || []).map((img) => img.publicId).filter(Boolean);
       ad.images = imageMeta;
     } else {
       ad.images = [...(ad.images || []), ...imageMeta];
@@ -230,10 +336,9 @@ export async function updateAd(account, adId, input = {}, imageMeta = []) {
   }
 
   if (input.status === 'published' || input.publish === true) {
-    const seller = await requireVerifiedSeller(account._id);
-    if (seller.verificationStatus !== 'verified') {
-      throw new AppError(403, 'SELLER_NOT_VERIFIED', 'Seller must be verified before publishing listings');
-    }
+    // Acting seller (authenticated account) must be verified — not the stored advertiser alone.
+    // assertCanManageAd already enforced owner or active marketplace.manage_farmer_ads.
+    await assertVerifiedSellerForPublish(account._id);
     if (!ad.images?.length) {
       throw new AppError(400, 'IMAGES_REQUIRED', 'At least one image is required to publish');
     }
@@ -250,6 +355,10 @@ export async function updateAd(account, adId, input = {}, imageMeta = []) {
   }
 
   await ad.save();
+  // DB commit succeeded — safe to destroy replaced assets (not the newly saved ones).
+  if (pendingDestroyIds.length) {
+    await destroyAssets(pendingDestroyIds, { retries: 2 });
+  }
   await invalidateAd(ad._id);
   return toOwnerAdDto(ad);
 }

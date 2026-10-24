@@ -27,9 +27,13 @@ function regenerateSession(req) {
 }
 
 function destroySession(req) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     if (!req.session) return resolve();
-    req.session.destroy((error) => error ? reject(error) : resolve());
+    req.session.destroy((error) => {
+      // Logout must clear the client cookie even if store deletion races or fails transiently.
+      if (error) logger.warn({ error: error.message }, 'Session destroy reported an error');
+      resolve();
+    });
   });
 }
 

@@ -5,13 +5,14 @@ import {
   findOwnedFarmerProfile,
 } from '../farm-access/service.js';
 import { assertAnimalInFarm } from '../animals/service.js';
+import { parseBusinessDate, formatBusinessDate } from '../../shared/time/businessDate.js';
 
 function publicYield(doc) {
   return {
     id: String(doc._id),
     farmerProfileId: String(doc.farmerProfileId),
     animalId: String(doc.animalId),
-    yieldDate: doc.yieldDate,
+    yieldDate: formatBusinessDate(doc.yieldDate),
     litres: doc.litres,
     timeSlot: doc.timeSlot,
     notes: doc.notes || null,
@@ -52,20 +53,13 @@ function parseLitres(value) {
   return n;
 }
 
-function parseYieldDate(value) {
-  if (!value) throw new AppError(400, 'YIELD_DATE_REQUIRED', 'yieldDate is required');
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) throw new AppError(400, 'INVALID_YIELD_DATE', 'yieldDate is invalid');
-  return d;
-}
-
 export async function recordYield(account, input = {}) {
   const { farmerProfile } = await resolveScope(account, input.farmerProfileId, 'milk.record');
   if (!input.animalId) throw new AppError(400, 'ANIMAL_REQUIRED', 'animalId is required');
   await assertAnimalInFarm(input.animalId, farmerProfile._id);
 
   const litres = parseLitres(input.litres);
-  const yieldDate = parseYieldDate(input.yieldDate);
+  const yieldDate = parseBusinessDate(input.yieldDate, { field: 'yieldDate', required: true });
   const timeSlot = TIME_SLOTS.includes(input.timeSlot) ? input.timeSlot : 'other';
 
   const row = await MilkYieldRecord.create({
@@ -87,10 +81,10 @@ export async function listYields(account, query = {}) {
   if (query.animalId) filter.animalId = query.animalId;
   if (query.from || query.to) {
     filter.yieldDate = {};
-    if (query.from) filter.yieldDate.$gte = parseYieldDate(query.from);
-    if (query.to) filter.yieldDate.$lte = parseYieldDate(query.to);
+    if (query.from) filter.yieldDate.$gte = parseBusinessDate(query.from, { field: 'from' });
+    if (query.to) filter.yieldDate.$lte = parseBusinessDate(query.to, { field: 'to' });
   }
-  const rows = await MilkYieldRecord.find(filter).sort({ yieldDate: -1 }).limit(500);
+  const rows = await MilkYieldRecord.find(filter).sort({ yieldDate: -1, createdAt: -1 }).limit(500);
   return rows.map(publicYield);
 }
 
@@ -99,9 +93,33 @@ export async function updateYield(account, yieldId, input = {}) {
   if (!row) throw new AppError(404, 'YIELD_NOT_FOUND', 'Milk yield record not found');
   await resolveScope(account, row.farmerProfileId, 'milk.update');
 
+  // Cannot silently move records between farmers or animals.
+  if (input.farmerProfileId !== undefined
+      && String(input.farmerProfileId) !== String(row.farmerProfileId)) {
+    throw new AppError(
+      403,
+      'YIELD_SCOPE_IMMUTABLE',
+      'Cannot change farmerProfileId on an existing milk yield record',
+    );
+  }
+  if (input.animalId !== undefined && String(input.animalId) !== String(row.animalId)) {
+    throw new AppError(
+      403,
+      'YIELD_ANIMAL_IMMUTABLE',
+      'Cannot reassign animalId on an existing milk yield record',
+    );
+  }
+
   if (input.litres !== undefined) row.litres = parseLitres(input.litres);
-  if (input.yieldDate !== undefined) row.yieldDate = parseYieldDate(input.yieldDate);
-  if (input.timeSlot !== undefined && TIME_SLOTS.includes(input.timeSlot)) row.timeSlot = input.timeSlot;
+  if (input.yieldDate !== undefined) {
+    row.yieldDate = parseBusinessDate(input.yieldDate, { field: 'yieldDate', required: true });
+  }
+  if (input.timeSlot !== undefined) {
+    if (!TIME_SLOTS.includes(input.timeSlot)) {
+      throw new AppError(400, 'INVALID_TIME_SLOT', `timeSlot must be one of: ${TIME_SLOTS.join(', ')}`);
+    }
+    row.timeSlot = input.timeSlot;
+  }
   if (input.notes !== undefined) row.notes = String(input.notes).trim();
 
   await row.save();
@@ -114,8 +132,8 @@ export async function summarizeYields(account, query = {}) {
   if (query.animalId) match.animalId = query.animalId;
   if (query.from || query.to) {
     match.yieldDate = {};
-    if (query.from) match.yieldDate.$gte = parseYieldDate(query.from);
-    if (query.to) match.yieldDate.$lte = parseYieldDate(query.to);
+    if (query.from) match.yieldDate.$gte = parseBusinessDate(query.from, { field: 'from' });
+    if (query.to) match.yieldDate.$lte = parseBusinessDate(query.to, { field: 'to' });
   }
 
   const [agg] = await MilkYieldRecord.aggregate([
@@ -133,7 +151,9 @@ export async function summarizeYields(account, query = {}) {
     farmerProfileId: String(farmerProfile._id),
     totalLitres: agg?.totalLitres || 0,
     recordCount: agg?.recordCount || 0,
-    // Explicit: this is production volume, not income.
+    // Explicit: production volume only — never financial income.
     isFinancial: false,
   };
 }
+
+export { publicYield, TIME_SLOTS };

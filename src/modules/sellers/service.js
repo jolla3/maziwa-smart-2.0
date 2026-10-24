@@ -49,3 +49,46 @@ export async function setVerificationStatus(actorAccount, sellerProfileId, statu
   await profile.save();
   return publicSeller(profile);
 }
+
+/**
+ * Public verification gate for marketplace publish.
+ * Other modules must use this instead of importing SellerProfile model.
+ */
+export async function assertVerifiedForPublish(accountId) {
+  const seller = await SellerProfile.findOne({ accountId });
+  if (!seller) {
+    throw new AppError(403, 'SELLER_PROFILE_REQUIRED', 'A seller profile is required to publish listings');
+  }
+  if (seller.verificationStatus !== 'verified') {
+    throw new AppError(403, 'SELLER_NOT_VERIFIED', 'Seller must be verified before publishing listings');
+  }
+  return publicSeller(seller);
+}
+
+/** Whether the account has a verified seller profile (boolean, no throw). */
+export async function isVerifiedSeller(accountId) {
+  const seller = await SellerProfile.findOne({ accountId });
+  return Boolean(seller && seller.verificationStatus === 'verified');
+}
+
+/**
+ * Create a pending seller profile for a newly registered account.
+ * Idempotent: returns existing profile if already present.
+ */
+export async function createPendingSellerProfile(accountId) {
+  if (!accountId) throw new AppError(400, 'ACCOUNT_REQUIRED', 'accountId is required');
+  let profile = await SellerProfile.findOne({ accountId });
+  if (profile) return publicSeller(profile);
+  profile = await SellerProfile.create({
+    accountId,
+    verificationStatus: 'pending',
+    submittedAt: new Date(),
+  });
+  return publicSeller(profile);
+}
+
+export async function getSellerProfileForAccount(accountId) {
+  if (!accountId) return null;
+  const profile = await SellerProfile.findOne({ accountId });
+  return publicSeller(profile);
+}

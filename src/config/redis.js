@@ -140,9 +140,22 @@ export function getRedisStatusSnapshot() {
 }
 
 export async function disconnectRedis() {
-  if (client) {
-    await client.quit();
-    client = null;
-    lastPingOk = false;
+  if (!client) return;
+  const current = client;
+  client = null;
+  lastPingOk = false;
+  try {
+    current.removeAllListeners();
+  } catch {
+    /* ignore */
+  }
+  try {
+    await current.quit();
+  } catch {
+    try {
+      current.disconnect(false);
+    } catch {
+      /* ignore */
+    }
   }
 }

@@ -24,7 +24,7 @@ describe('identity input validation', () => {
   });
 
   test('allows only supported Google self-registration roles', () => {
-    expect(normalizeGoogleSignupRole(undefined)).toBe('buyer');
+    expect(normalizeGoogleSignupRole(undefined)).toBeNull();
     expect(normalizeGoogleSignupRole('FARMER')).toBe('farmer');
     expect(normalizeGoogleSignupRole('seller')).toBe('seller');
     expect(normalizeGoogleSignupRole('superadmin')).toBeNull();

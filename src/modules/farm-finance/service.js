@@ -2,6 +2,7 @@ import { FarmFinancialEntry, ENTRY_TYPES } from './model.js';
 import { AppError } from '../../shared/errors/AppError.js';
 import { resolveFarmScope } from '../../shared/farm/resolveScope.js';
 import { assertAnimalInFarm } from '../animals/service.js';
+import { parseBusinessDate, formatBusinessDate } from '../../shared/time/businessDate.js';
 
 function publicEntry(doc) {
   return {
@@ -12,7 +13,7 @@ function publicEntry(doc) {
     currency: doc.currency,
     category: doc.category,
     description: doc.description || null,
-    entryDate: doc.entryDate,
+    entryDate: formatBusinessDate(doc.entryDate),
     animalId: doc.animalId ? String(doc.animalId) : null,
     relatedFeedRecordId: doc.relatedFeedRecordId ? String(doc.relatedFeedRecordId) : null,
     recordedByAccountId: doc.recordedByAccountId ? String(doc.recordedByAccountId) : null,
@@ -30,11 +31,12 @@ function parseAmount(value) {
   return n;
 }
 
-function parseDate(value, field = 'entryDate') {
-  if (!value) throw new AppError(400, 'DATE_REQUIRED', `${field} is required`);
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) throw new AppError(400, 'INVALID_DATE', `${field} is invalid`);
-  return d;
+function parseCurrency(value) {
+  const c = String(value || 'KES').trim().toUpperCase();
+  if (!c || !/^[A-Z]{3}$/.test(c)) {
+    throw new AppError(400, 'INVALID_CURRENCY', 'currency must be a 3-letter ISO-style code (e.g. KES)');
+  }
+  return c;
 }
 
 function permissionForCreate(entryType) {
@@ -61,20 +63,27 @@ export async function createEntry(account, input = {}) {
     await assertAnimalInFarm(input.animalId, farmerProfile._id);
   }
 
-  const currency = String(input.currency || 'KES').trim().toUpperCase() || 'KES';
+  // relatedFeedRecordId is informational only — no private FeedRecord import; no amount derivation.
   const entry = await FarmFinancialEntry.create({
     farmerProfileId: farmerProfile._id,
     entryType,
     amount: parseAmount(input.amount),
-    currency,
+    currency: parseCurrency(input.currency),
     category,
     description: input.description ? String(input.description).trim() : undefined,
-    entryDate: parseDate(input.entryDate),
+    entryDate: parseBusinessDate(input.entryDate, { field: 'entryDate', required: true }),
     animalId: input.animalId || undefined,
     relatedFeedRecordId: input.relatedFeedRecordId || undefined,
     recordedByAccountId: account._id,
     status: 'posted',
   });
+  return publicEntry(entry);
+}
+
+export async function getEntry(account, entryId) {
+  const entry = await FarmFinancialEntry.findById(entryId);
+  if (!entry) throw new AppError(404, 'ENTRY_NOT_FOUND', 'Financial entry not found');
+  await resolveFarmScope(account, entry.farmerProfileId, 'finance.read');
   return publicEntry(entry);
 }
 
@@ -85,6 +94,23 @@ export async function updateEntry(account, entryId, input = {}) {
   }
   await resolveFarmScope(account, entry.farmerProfileId, 'finance.update');
 
+  if (input.farmerProfileId !== undefined
+      && String(input.farmerProfileId) !== String(entry.farmerProfileId)) {
+    throw new AppError(
+      403,
+      'FINANCE_SCOPE_IMMUTABLE',
+      'Cannot change farmerProfileId on an existing financial entry',
+    );
+  }
+  if (input.entryType !== undefined
+      && String(input.entryType).trim().toLowerCase() !== entry.entryType) {
+    throw new AppError(
+      400,
+      'ENTRY_TYPE_IMMUTABLE',
+      'Cannot reclassify entryType after create; void and record a new entry if needed',
+    );
+  }
+
   if (input.amount !== undefined) entry.amount = parseAmount(input.amount);
   if (input.category !== undefined) {
     const category = String(input.category).trim();
@@ -92,18 +118,34 @@ export async function updateEntry(account, entryId, input = {}) {
     entry.category = category;
   }
   if (input.description !== undefined) entry.description = String(input.description).trim();
-  if (input.entryDate !== undefined) entry.entryDate = parseDate(input.entryDate);
-  if (input.currency !== undefined) {
-    entry.currency = String(input.currency).trim().toUpperCase() || entry.currency;
+  if (input.entryDate !== undefined) {
+    entry.entryDate = parseBusinessDate(input.entryDate, { field: 'entryDate', required: true });
   }
-  // entryType is immutable after create to avoid silent reclassification abuse
+  if (input.currency !== undefined) entry.currency = parseCurrency(input.currency);
+  if (input.animalId !== undefined) {
+    if (input.animalId) {
+      await assertAnimalInFarm(input.animalId, entry.farmerProfileId);
+      entry.animalId = input.animalId;
+    } else {
+      entry.animalId = undefined;
+    }
+  }
+  if (input.relatedFeedRecordId !== undefined) {
+    entry.relatedFeedRecordId = input.relatedFeedRecordId || undefined;
+  }
+
   await entry.save();
   return publicEntry(entry);
 }
 
+/**
+ * Soft-void using existing baseline route. Requires finance.update.
+ * Does not invent broader deletion/audit workflows.
+ */
 export async function voidEntry(account, entryId) {
   const entry = await FarmFinancialEntry.findById(entryId);
   if (!entry) throw new AppError(404, 'ENTRY_NOT_FOUND', 'Financial entry not found');
+  if (entry.status === 'void') return publicEntry(entry);
   await resolveFarmScope(account, entry.farmerProfileId, 'finance.update');
   entry.status = 'void';
   await entry.save();
@@ -112,22 +154,27 @@ export async function voidEntry(account, entryId) {
 
 export async function listEntries(account, query = {}) {
   const { farmerProfile } = await resolveFarmScope(account, query.farmerProfileId, 'finance.read');
-  const filter = { farmerProfileId: farmerProfile._id, status: query.includeVoid === 'true' ? { $in: ['posted', 'void'] } : 'posted' };
+  const filter = {
+    farmerProfileId: farmerProfile._id,
+    status: query.includeVoid === 'true' || query.includeVoid === true
+      ? { $in: ['posted', 'void'] }
+      : 'posted',
+  };
   if (query.entryType && ENTRY_TYPES.includes(query.entryType)) filter.entryType = query.entryType;
   if (query.currency) filter.currency = String(query.currency).toUpperCase();
   if (query.category) filter.category = String(query.category).trim();
   if (query.from || query.to) {
     filter.entryDate = {};
-    if (query.from) filter.entryDate.$gte = parseDate(query.from, 'from');
-    if (query.to) filter.entryDate.$lte = parseDate(query.to, 'to');
+    if (query.from) filter.entryDate.$gte = parseBusinessDate(query.from, { field: 'from' });
+    if (query.to) filter.entryDate.$lte = parseBusinessDate(query.to, { field: 'to' });
   }
   const rows = await FarmFinancialEntry.find(filter).sort({ entryDate: -1 }).limit(500);
   return rows.map(publicEntry);
 }
 
 /**
- * Profit = sum(posted income) − sum(posted expenses) per currency.
- * Does not use milk litres or any operational quantity.
+ * recordedProfit = sum(posted income) − sum(posted expenses) per currency.
+ * Never includes milk litres, feed quantities, or marketplace inference.
  */
 export async function summarize(account, query = {}) {
   const { farmerProfile } = await resolveFarmScope(account, query.farmerProfileId, 'finance.read');
@@ -137,8 +184,8 @@ export async function summarize(account, query = {}) {
   };
   if (query.from || query.to) {
     match.entryDate = {};
-    if (query.from) match.entryDate.$gte = parseDate(query.from, 'from');
-    if (query.to) match.entryDate.$lte = parseDate(query.to, 'to');
+    if (query.from) match.entryDate.$gte = parseBusinessDate(query.from, { field: 'from' });
+    if (query.to) match.entryDate.$lte = parseBusinessDate(query.to, { field: 'to' });
   }
   if (query.currency) match.currency = String(query.currency).toUpperCase();
 
@@ -181,9 +228,11 @@ export async function summarize(account, query = {}) {
   return {
     farmerProfileId: String(farmerProfile._id),
     byCurrency: Object.values(byCurrency),
-    // Explicit invariants for clients and auditors
     derivedFrom: 'FarmFinancialEntry.posted_only',
     includesMilkLitres: false,
+    includesFeedQuantities: false,
     includesMarketplaceInference: false,
   };
 }
+
+export { publicEntry, ENTRY_TYPES };

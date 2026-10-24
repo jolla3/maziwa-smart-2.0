@@ -13,8 +13,16 @@ const imageSchema = new mongoose.Schema({
 }, { _id: false });
 
 /**
- * LivestockAd — public marketplace advertisement (legacy Listing concept).
- * Not a sale/checkout record. Optional animalId when livestock is registered.
+ * LivestockAd — public marketplace advertisement (not checkout/sale).
+ *
+ * Identity fields:
+ * - advertiserAccountId: Account acting as seller/advertiser of record (publish eligibility).
+ * - createdByAccountId: Account that created the row (audit). Optional for legacy rows until backfill.
+ * - farmerProfileId: Farm scope when representing a farmer's livestock.
+ * - animalId: Optional registered Animal in that farm scope.
+ *
+ * Management authorization is NOT "advertiserAccountId === actor" for farm-scoped ads.
+ * See service assertCanManageAd.
  */
 const livestockAdSchema = new mongoose.Schema({
   advertiserAccountId: {
@@ -23,7 +31,12 @@ const livestockAdSchema = new mongoose.Schema({
     required: true,
     index: true,
   },
-  /** Optional farmer scope when ad is for a farmer-owned registered animal. */
+  /** Audit: who created the record. Not required so pre-migration docs still load/save. */
+  createdByAccountId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Account',
+    index: true,
+  },
   farmerProfileId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'FarmerProfile',
@@ -42,7 +55,6 @@ const livestockAdSchema = new mongoose.Schema({
   location: { type: String, trim: true, default: '' },
   images: { type: [imageSchema], default: [] },
   status: { type: String, enum: AD_STATUSES, default: 'draft', index: true },
-  /** Public-facing attributes (age, breed text, sex) — not private farm keys. */
   attributes: {
     breedLabel: { type: String, trim: true },
     gender: { type: String, enum: ['female', 'male', 'unknown'] },

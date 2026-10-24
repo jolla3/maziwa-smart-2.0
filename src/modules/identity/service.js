@@ -1,8 +1,8 @@
 import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import { Account } from './model.js';
-import { FarmerProfile } from '../farmers/model.js';
-import { SellerProfile } from '../sellers/model.js';
+import * as farmersService from '../farmers/service.js';
+import * as sellersService from '../sellers/service.js';
 import { sendPasswordResetEmail, sendWelcomeEmail } from './emailService.js';
 import { logger } from '../../config/logger.js';
 import {
@@ -39,11 +39,14 @@ async function assertEmailUnused(email) {
 }
 
 async function generateFarmerCode() {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    const candidate = crypto.randomInt(10_000_000, 100_000_000);
-    if (!(await FarmerProfile.exists({ farmerCode: candidate }))) return candidate;
+  try {
+    return await farmersService.allocateFarmerCode();
+  } catch (error) {
+    if (error?.code === 'FARMER_CODE_UNAVAILABLE' || error?.status === 503) {
+      throw new IdentityError(503, 'FARMER_CODE_UNAVAILABLE', 'Could not generate a farmer code. Please try again.');
+    }
+    throw error;
   }
-  throw new IdentityError(503, 'FARMER_CODE_UNAVAILABLE', 'Could not generate a farmer code. Please try again.');
 }
 
 async function createAccountAndProfile(accountInput, profileCreator) {
@@ -95,7 +98,7 @@ export async function registerSeller(input) {
       role: 'seller',
       passwordHash: await bcrypt.hash(password, BCRYPT_ROUNDS),
       onboardingComplete: true,
-    }, (created) => SellerProfile.create({ accountId: created._id, verificationStatus: 'pending' }));
+    }, (created) => sellersService.createPendingSellerProfile(created._id));
     void sendWelcomeEmail(account.email, account.username, 'seller').catch((error) => logger.warn({ error: error.message }, 'Welcome email failed'));
     return {
       ...publicAccount(account),
@@ -117,7 +120,7 @@ export async function registerFarmer(input) {
     throw new IdentityError(400, 'FARMER_DETAILS_REQUIRED', 'Full name and phone number are required.');
   }
   await assertEmailUnused(email);
-  if (await FarmerProfile.exists({ phone })) {
+  if (await farmersService.isFarmerPhoneTaken(phone)) {
     throw new IdentityError(409, 'FARMER_PHONE_EXISTS', 'Farmer already exists with this phone number.');
   }
   const farmerCode = await generateFarmerCode();
@@ -132,7 +135,7 @@ export async function registerFarmer(input) {
       role: 'farmer',
       passwordHash: await bcrypt.hash(password, BCRYPT_ROUNDS),
       onboardingComplete: true,
-    }, (created) => FarmerProfile.create({
+    }, (created) => farmersService.createFarmerProfileForAccount({
       accountId: created._id,
       fullName,
       farmerCode,
@@ -200,7 +203,7 @@ export async function findOrCreateGoogleAccount(profile, selectedRole) {
       onboardingComplete: false,
     }, async (newAccount) => {
       if (selectedRole === 'farmer') {
-        await FarmerProfile.create({
+        await farmersService.createFarmerProfileForAccount({
           accountId: newAccount._id,
           fullName: displayName,
           email,
@@ -208,7 +211,7 @@ export async function findOrCreateGoogleAccount(profile, selectedRole) {
           isActive: true,
         });
       } else if (selectedRole === 'seller') {
-        await SellerProfile.create({ accountId: newAccount._id, verificationStatus: 'pending' });
+        await sellersService.createPendingSellerProfile(newAccount._id);
       }
     });
     void sendWelcomeEmail(created.email, displayName, selectedRole).catch((error) => logger.warn({ error: error.message }, 'Welcome email failed'));
@@ -225,7 +228,7 @@ export async function findOrCreateGoogleAccount(profile, selectedRole) {
 export async function needsPasswordSetup(account) {
   if (!account?.passwordHash || !account.onboardingComplete) return true;
   if (account.role === 'farmer') {
-    const farmer = await FarmerProfile.findOne({ accountId: account._id }).select('farmerCode');
+    const farmer = await farmersService.getFarmerProfileForAccount(account._id);
     return !farmer?.farmerCode;
   }
   return false;
@@ -236,22 +239,27 @@ export async function completePasswordSetup(accountId, input) {
   const account = await Account.findById(accountId).select('+passwordHash');
   if (!account || !account.isActive) throw new IdentityError(404, 'ACCOUNT_NOT_FOUND', 'Account not found.');
 
-  let farmerProfile = null;
   if (account.role === 'farmer') {
-    farmerProfile = await FarmerProfile.findOne({ accountId: account._id });
+    const farmerProfile = await farmersService.getFarmerProfileForAccount(account._id);
     if (!farmerProfile) throw new IdentityError(409, 'FARMER_PROFILE_MISSING', 'Farmer profile is not available for this account.');
-
+    const updates = {};
     if (!farmerProfile.farmerCode) {
       const code = normalizeFarmerCode(input.farmer_code);
       if (!code) throw new IdentityError(400, 'FARMER_CODE_REQUIRED', 'Farmer code must be an 8-digit number.');
-      if (await FarmerProfile.exists({ farmerCode: code, _id: { $ne: farmerProfile._id } })) {
-        throw new IdentityError(409, 'FARMER_CODE_EXISTS', `Farmer code ${code} already exists. Choose another one.`);
-      }
-      farmerProfile.farmerCode = code;
+      updates.farmerCode = code;
     }
-    if (input.phone) farmerProfile.phone = String(input.phone).trim();
-    if (input.location) farmerProfile.location = String(input.location).trim();
-    await farmerProfile.save();
+    if (input.phone) updates.phone = String(input.phone).trim();
+    if (input.location) updates.location = String(input.location).trim();
+    if (Object.keys(updates).length) {
+      try {
+        await farmersService.updateFarmerProfileForAccount(account._id, updates);
+      } catch (error) {
+        if (error?.code === 'FARMER_CODE_EXISTS') {
+          throw new IdentityError(409, 'FARMER_CODE_EXISTS', error.message);
+        }
+        throw error;
+      }
+    }
   }
 
   account.passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
@@ -319,7 +327,7 @@ export async function resetPassword(tokenValue, newPasswordValue) {
 export async function getProfile(account) {
   const base = publicAccount(account);
   if (account.role === 'farmer') {
-    const farmer = await FarmerProfile.findOne({ accountId: account._id });
+    const farmer = await farmersService.getFarmerProfileForAccount(account._id);
     if (!farmer) throw new IdentityError(404, 'PROFILE_NOT_FOUND', 'Farmer profile not found.');
     return {
       ...base,
@@ -333,7 +341,7 @@ export async function getProfile(account) {
     };
   }
   if (account.role === 'seller') {
-    const seller = await SellerProfile.findOne({ accountId: account._id });
+    const seller = await sellersService.getSellerProfileForAccount(account._id);
     return {
       ...base,
       is_approved_seller: seller?.verificationStatus === 'verified',
@@ -362,16 +370,22 @@ export async function updateProfile(account, input) {
   }
 
   if (account.role === 'farmer') {
-    const farmer = await FarmerProfile.findOne({ accountId: account._id });
-    if (!farmer) throw new IdentityError(404, 'PROFILE_NOT_FOUND', 'Farmer profile not found.');
+    const farmerUpdates = {};
     if (changes.fullname !== undefined) {
-      farmer.fullName = String(changes.fullname).trim();
-      account.username = farmer.fullName;
+      farmerUpdates.fullName = String(changes.fullname).trim();
+      account.username = farmerUpdates.fullName;
     }
     for (const field of ['phone', 'location', 'photo']) {
-      if (changes[field] !== undefined) farmer[field] = String(changes[field]).trim();
+      if (changes[field] !== undefined) farmerUpdates[field] = String(changes[field]).trim();
     }
-    await farmer.save();
+    try {
+      await farmersService.updateFarmerProfileForAccount(account._id, farmerUpdates);
+    } catch (error) {
+      if (error?.code === 'FARMER_PROFILE_NOT_FOUND') {
+        throw new IdentityError(404, 'PROFILE_NOT_FOUND', 'Farmer profile not found.');
+      }
+      throw error;
+    }
   } else {
     for (const field of Object.keys(changes)) {
       if (field === 'username' && !String(changes[field]).trim()) {
@@ -385,6 +399,31 @@ export async function updateProfile(account, input) {
   if (changes.photo !== undefined) account.photo = String(changes.photo).trim();
   await account.save();
   return getProfile(account);
+}
+
+
+/**
+ * Narrow public identity lookup for other modules (e.g. farm-access recipient checks).
+ * Never returns password hashes, tokens, or session secrets.
+ */
+export async function getAccountForSession(accountId) {
+  if (!accountId) return null;
+  const account = await Account.findById(accountId)
+    .select('_id email role isActive sessionVersion username phone location photo onboardingComplete');
+  return account || null;
+}
+
+export async function getActiveAccountRef(accountId) {
+  if (!accountId) return null;
+  const account = await Account.findById(accountId).select('_id email role isActive');
+  if (!account || !account.isActive) return null;
+  return {
+    _id: account._id,
+    id: String(account._id),
+    email: account.email,
+    role: account.role,
+    isActive: account.isActive,
+  };
 }
 
 export { publicAccount };

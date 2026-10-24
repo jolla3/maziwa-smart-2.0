@@ -8,6 +8,7 @@ const asyncRoute = (h) => (req, res, next) => Promise.resolve(h(req, res, next))
 router.get('/summary', requireAuth, asyncRoute(controller.summary));
 router.get('/', requireAuth, asyncRoute(controller.list));
 router.post('/', requireAuth, asyncRoute(controller.create));
+router.get('/:entryId', requireAuth, asyncRoute(controller.getOne));
 router.patch('/:entryId', requireAuth, asyncRoute(controller.update));
 router.post('/:entryId/void', requireAuth, asyncRoute(controller.voidEntry));
 

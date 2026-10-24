@@ -7,6 +7,7 @@ const asyncRoute = (h) => (req, res, next) => Promise.resolve(h(req, res, next))
 
 router.get('/', requireAuth, asyncRoute(controller.list));
 router.post('/', requireAuth, asyncRoute(controller.create));
+router.get('/:recordId', requireAuth, asyncRoute(controller.getOne));
 router.patch('/:recordId', requireAuth, asyncRoute(controller.update));
 
 export default router;

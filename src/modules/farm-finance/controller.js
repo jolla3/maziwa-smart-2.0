@@ -27,6 +27,15 @@ export async function list(req, res) {
   }
 }
 
+export async function getOne(req, res) {
+  try {
+    const entry = await service.getEntry(req.account, req.params.entryId);
+    return apiResponse.success(res, { entry });
+  } catch (error) {
+    return handle(res, error);
+  }
+}
+
 export async function update(req, res) {
   try {
     const entry = await service.updateEntry(req.account, req.params.entryId, req.body || {});

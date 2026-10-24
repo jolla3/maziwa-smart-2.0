@@ -35,7 +35,9 @@ export function oauthStateMatches(supplied, expected) {
 }
 
 export function normalizeGoogleSignupRole(value) {
-  const role = typeof value === 'string' && value.trim() ? value.trim().toLowerCase() : 'buyer';
+  // Explicit role required — do not silently default to buyer (profile-creation policy unresolved).
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const role = value.trim().toLowerCase();
   return GOOGLE_SIGNUP_ROLES.has(role) ? role : null;
 }
 

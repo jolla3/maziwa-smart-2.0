@@ -1,6 +1,5 @@
 /**
- * Public-safe projection for LivestockAd.
- * Must not expose advertiser internal keys, farmer ownership keys, grants, or account PII.
+ * Public-safe projection — no internal ownership, creator, or farm keys.
  */
 export function toPublicAdDto(ad) {
   if (!ad) return null;
@@ -28,16 +27,17 @@ export function toPublicAdDto(ad) {
     },
     publishedAt: ad.publishedAt || null,
     viewCount: ad.viewCount || 0,
-    // Deliberately omitted: advertiserAccountId, farmerProfileId, animalId
   };
 }
 
+/** Authorized management projection — may include internal ids for the actor. */
 export function toOwnerAdDto(ad) {
   const base = toPublicAdDto(ad);
   if (!base) return null;
   return {
     ...base,
     advertiserAccountId: String(ad.advertiserAccountId),
+    createdByAccountId: ad.createdByAccountId ? String(ad.createdByAccountId) : null,
     farmerProfileId: ad.farmerProfileId ? String(ad.farmerProfileId) : null,
     animalId: ad.animalId ? String(ad.animalId) : null,
     closedAt: ad.closedAt || null,

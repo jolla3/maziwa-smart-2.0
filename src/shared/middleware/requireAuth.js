@@ -1,6 +1,10 @@
-import { Account } from '../../modules/identity/model.js';
 import { apiResponse } from '../http/response.js';
+import * as identityService from '../../modules/identity/service.js';
 
+/**
+ * Hydrate req.account from the session via identity public service.
+ * Does not import the Account Mongoose model directly.
+ */
 export async function requireAuth(req, res, next) {
   const accountId = req.session?.userId;
   if (!accountId) {
@@ -8,7 +12,7 @@ export async function requireAuth(req, res, next) {
   }
 
   try {
-    const account = await Account.findById(accountId);
+    const account = await identityService.getAccountForSession(accountId);
     const sessionVersion = Number(req.session?.sessionVersion ?? 0);
     if (!account || !account.isActive || sessionVersion !== Number(account.sessionVersion ?? 0)) {
       return req.session.destroy(() => {
