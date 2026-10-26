@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import { LivestockAd, AdViewEvent, AD_STATUSES, SPECIES } from './model.js';
 import { toPublicAdDto, toOwnerAdDto } from './publicDto.js';
 import { publicAdCacheKey, publicAdLockKey, publicAdGenKey } from './cacheKeys.js';
@@ -44,6 +45,12 @@ export async function assertVerifiedSellerForPublish(actingAccountId) {
  * Independent (no farmerProfileId):
  *   - Only advertiserAccountId may manage.
  */
+function isPublishRequested(input = {}) {
+  if (input.status === 'published' || input.publish === true) return true;
+  return typeof input.publish === 'string'
+    && input.publish.trim().toLowerCase() === 'true';
+}
+
 export async function assertCanManageAd(account, ad) {
   if (!account?._id) {
     throw new AppError(401, 'AUTH_REQUIRED', 'Authentication required');
@@ -245,7 +252,7 @@ export async function createAd(account, input = {}, imageMeta = []) {
   // Ensure seller profile via sellers module public API (no private model import).
   await sellersService.ensureSellerProfile({ _id: advertiserAccountId });
 
-  const status = input.publish === true || input.status === 'published' ? 'published' : 'draft';
+  const status = isPublishRequested(input) ? 'published' : 'draft';
   if (status === 'published') {
     // Acting seller must be verified (§6.2). advertiserAccountId is set to actor on create.
     await assertVerifiedSellerForPublish(account._id);
@@ -335,7 +342,7 @@ export async function updateAd(account, adId, input = {}, imageMeta = []) {
     }
   }
 
-  if (input.status === 'published' || input.publish === true) {
+  if (isPublishRequested(input)) {
     // Acting seller (authenticated account) must be verified — not the stored advertiser alone.
     // assertCanManageAd already enforced owner or active marketplace.manage_farmer_ads.
     await assertVerifiedSellerForPublish(account._id);
@@ -371,4 +378,28 @@ export async function archiveAd(account, adId) {
   await ad.save();
   await invalidateAd(ad._id);
   return toOwnerAdDto(ad);
+}
+
+/**
+ * Internal messaging target resolution for the conversations module.
+ * Returns only fields needed to open a listing conversation.
+ * Recipient is always advertiserAccountId — never createdByAccountId or farmerProfileId.
+ * Not a public DTO; do not expose through marketplace public responses.
+ */
+export async function getMessagingTargetForAd(livestockAdId) {
+  if (!livestockAdId || !mongoose.Types.ObjectId.isValid(String(livestockAdId))) {
+    throw new AppError(400, 'INVALID_LIVESTOCK_AD_ID', 'livestockAdId is required');
+  }
+  const ad = await LivestockAd.findById(livestockAdId)
+    .select('_id status advertiserAccountId title')
+    .lean();
+  if (!ad) {
+    throw new AppError(404, 'LIVESTOCK_AD_NOT_FOUND', 'Livestock advertisement not found');
+  }
+  return {
+    adId: String(ad._id),
+    status: ad.status,
+    advertiserAccountId: String(ad.advertiserAccountId),
+    title: typeof ad.title === 'string' ? ad.title : '',
+  };
 }
