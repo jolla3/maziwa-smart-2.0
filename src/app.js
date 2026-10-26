@@ -28,6 +28,7 @@ import analyticsRoutes from './modules/analytics/routes.js';
 import marketplaceRoutes from './modules/livestock-marketplace/routes.js';
 import sellersRoutes from './modules/sellers/routes.js';
 import conversationsRoutes from './modules/conversations/routes.js';
+import assistanceRoutes from './modules/assistance/routes.js';
 import { AppError } from './shared/errors/AppError.js';
 
 export function createApp() {
@@ -106,8 +107,13 @@ export function createApp() {
   app.use('/api/v1/marketplace', marketplaceRoutes);
   app.use('/api/v1/sellers', sellersRoutes);
   app.use('/api/v1/conversations', conversationsRoutes);
+  app.use('/api/v1/assistance', assistanceRoutes);
   app.use((req, res) => apiResponse.error(res, 'NOT_FOUND', `No route for ${req.method} ${req.path}`, 404));
   app.use((err, req, res, _next) => {
+    // Body-parser malformed JSON → 400 VALIDATION_ERROR
+    if (err?.type === 'entity.parse.failed') {
+      return apiResponse.error(res, 'VALIDATION_ERROR', 'Invalid JSON body', 400);
+    }
     if (err?.name === 'IdentityError' && Number.isInteger(err.status)) {
       return apiResponse.error(res, err.code || 'IDENTITY_ERROR', err.message, err.status);
     }
@@ -116,6 +122,15 @@ export function createApp() {
     }
     logger.error({ error: err.message, path: req.path }, 'Unhandled request error');
     if (res.headersSent) return;
+    const url = String(req.originalUrl || req.url || '');
+    if (url.includes('/api/v1/assistance')) {
+      return apiResponse.error(
+        res,
+        'ASSISTANCE_INTERNAL_ERROR',
+        'Something went wrong while processing your request',
+        500,
+      );
+    }
     return apiResponse.error(res, 'INTERNAL_ERROR', 'Something went wrong', 500);
   });
   return app;
