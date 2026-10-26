@@ -51,3 +51,16 @@ When Cloudinary is unconfigured, `makeUploader` returns middleware that responds
 ## Out of scope
 
 Porter milk collection, payments, chatbot, messaging product work, full frontend.
+
+## Favourites (persisted, session-owned)
+
+**Module:** `src/modules/favourites/`
+**Reuse:** marketplace public visibility via `getPublicAdDtoIfPublished` / `mapPublishedPublicAdsByIds` (no private ownership fields).
+
+| Method | Path | Auth | Notes |
+|--------|------|------|-------|
+| GET | `/api/v1/favourites?page&limit` | `requireAuth` | Default page=1 limit=20 max 50. Returns `{ items, page, limit, total, totalPages }`. Items: `{ livestockAdId, savedAt, availability, ad }`. Unavailable ads: `ad: null`. |
+| PUT | `/api/v1/favourites/:livestockAdId` | `requireAuth` + CSRF | Only currently **published** ads. Atomic upsert. HTTP 200 `{ livestockAdId, saved: true, savedAt }` for new or existing. 404 if not publicly saveable. |
+| DELETE | `/api/v1/favourites/:livestockAdId` | `requireAuth` + CSRF | Idempotent. Account-scoped. Allowed even if ad archived/deleted. `{ livestockAdId, saved: false }`. |
+
+Ownership is always `req.account` from the session — never body/query `accountId`.

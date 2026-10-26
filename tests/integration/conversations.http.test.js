@@ -52,6 +52,8 @@ jest.unstable_mockModule('../../src/config/redis.js', () => ({
 jest.unstable_mockModule('../../src/modules/livestock-marketplace/service.js', () => ({
   getMessagingTargetForAd,
   listPublicAds: jest.fn(async () => ({ items: [] })),
+  getPublicAdDtoIfPublished: jest.fn(async () => null),
+  mapPublishedPublicAdsByIds: jest.fn(async () => new Map()),
   getPublicAd: jest.fn(),
   createAd: jest.fn(),
   updateAd: jest.fn(),

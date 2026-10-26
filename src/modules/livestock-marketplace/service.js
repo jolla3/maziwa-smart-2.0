@@ -125,6 +125,31 @@ export async function listPublicAds(query = {}) {
   };
 }
 
+
+/**
+ * Public-safe lookup without throwing — for cross-module consumers (e.g. favourites).
+ * Returns DTO only when the ad is currently published; otherwise null.
+ */
+export async function getPublicAdDtoIfPublished(adId) {
+  if (!mongoose.isValidObjectId(adId)) return null;
+  const ad = await LivestockAd.findOne({ _id: adId, status: 'published' }).lean();
+  return ad ? toPublicAdDto(ad) : null;
+}
+
+/**
+ * Batch public DTOs for published ads only. Keys are stringified ids.
+ */
+export async function mapPublishedPublicAdsByIds(adIds = []) {
+  const ids = [...new Set((adIds || []).map(String).filter((id) => mongoose.isValidObjectId(id)))];
+  const map = new Map();
+  if (!ids.length) return map;
+  const ads = await LivestockAd.find({ _id: { $in: ids }, status: 'published' }).lean();
+  for (const ad of ads) {
+    map.set(String(ad._id), toPublicAdDto(ad));
+  }
+  return map;
+}
+
 export async function getPublicAd(adId) {
   return getOrLoadPublicProduct({
     cacheKey: publicAdCacheKey(adId),

@@ -85,3 +85,8 @@ Do not mark Phase E complete solely because unit tests or mocked HTTP tests
 pass. Close the remaining acceptance gaps with explicit evidence, rerun the
 appropriate regression suite, and reconcile the project README and build
 status with the verified implementation.
+
+### Favourites (persisted)
+- Status: **implemented** (session-owned MongoDB Favourite model; isolated regression verification passed).
+- Legacy localStorage wishlist approaches: **replaced** (not ported).
+- Basket/checkout: **excluded**.

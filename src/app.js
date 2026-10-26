@@ -29,6 +29,7 @@ import marketplaceRoutes from './modules/livestock-marketplace/routes.js';
 import sellersRoutes from './modules/sellers/routes.js';
 import conversationsRoutes from './modules/conversations/routes.js';
 import assistanceRoutes from './modules/assistance/routes.js';
+import favouritesRoutes from './modules/favourites/routes.js';
 import { AppError } from './shared/errors/AppError.js';
 
 export function createApp() {
@@ -108,6 +109,7 @@ export function createApp() {
   app.use('/api/v1/sellers', sellersRoutes);
   app.use('/api/v1/conversations', conversationsRoutes);
   app.use('/api/v1/assistance', assistanceRoutes);
+  app.use('/api/v1/favourites', favouritesRoutes);
   app.use((req, res) => apiResponse.error(res, 'NOT_FOUND', `No route for ${req.method} ${req.path}`, 404));
   app.use((err, req, res, _next) => {
     // Body-parser malformed JSON → 400 VALIDATION_ERROR
