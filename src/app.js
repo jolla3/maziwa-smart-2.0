@@ -27,6 +27,7 @@ import farmRecordsRoutes from './modules/farm-records/routes.js';
 import analyticsRoutes from './modules/analytics/routes.js';
 import marketplaceRoutes from './modules/livestock-marketplace/routes.js';
 import sellersRoutes from './modules/sellers/routes.js';
+import conversationsRoutes from './modules/conversations/routes.js';
 import { AppError } from './shared/errors/AppError.js';
 
 export function createApp() {
@@ -40,13 +41,14 @@ export function createApp() {
   app.use(requestLogger);
 
   const crossSite = isCrossSiteFrontend();
-  app.use(session({
+  const sessionStore = MongoStore.create({ mongoUrl: env.MONGO_URI });
+  const sessionMiddleware = session({
     name: 'connect.sid',
     secret: env.SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
     proxy: true,
-    store: MongoStore.create({ mongoUrl: env.MONGO_URI }),
+    store: sessionStore,
     cookie: {
       httpOnly: true,
       secure: crossSite || isProduction,
@@ -54,7 +56,10 @@ export function createApp() {
       path: '/',
       maxAge: 8 * 60 * 60 * 1000,
     },
-  }));
+  });
+  app.locals.sessionStore = sessionStore;
+  app.locals.sessionMiddleware = sessionMiddleware;
+  app.use(sessionMiddleware);
   app.use(passport.initialize());
 
   // Liveness is intentionally before CSRF-cookie issuance and API middleware.
@@ -100,6 +105,7 @@ export function createApp() {
   app.use('/api/v1/analytics', analyticsRoutes);
   app.use('/api/v1/marketplace', marketplaceRoutes);
   app.use('/api/v1/sellers', sellersRoutes);
+  app.use('/api/v1/conversations', conversationsRoutes);
   app.use((req, res) => apiResponse.error(res, 'NOT_FOUND', `No route for ${req.method} ${req.path}`, 404));
   app.use((err, req, res, _next) => {
     if (err?.name === 'IdentityError' && Number.isInteger(err.status)) {
@@ -113,4 +119,27 @@ export function createApp() {
     return apiResponse.error(res, 'INTERNAL_ERROR', 'Something went wrong', 500);
   });
   return app;
+}
+
+
+/**
+ * Close resources created by createApp (session store).
+ * Call from test teardown before disconnecting mongoose / stopping memory servers.
+ */
+export async function disposeAppResources(appInstance) {
+  const store = appInstance?.locals?.sessionStore;
+  if (!store) return;
+  if (typeof store.close === 'function') {
+    await new Promise((resolve, reject) => {
+      try {
+        const result = store.close((err) => (err ? reject(err) : resolve()));
+        if (result && typeof result.then === 'function') {
+          result.then(resolve, reject);
+        }
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+  appInstance.locals.sessionStore = null;
 }

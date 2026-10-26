@@ -29,7 +29,8 @@ function handler(req, res) {
 
 class FailOpenRedisStore {
   constructor(prefix, windowMs) {
-    this.prefix = prefix;
+    const namespace = String(process.env.RATE_LIMIT_KEY_NAMESPACE || '').trim();
+    this.prefix = namespace ? `${namespace}:${prefix}` : prefix;
     this.windowMs = windowMs;
   }
 

@@ -7,19 +7,17 @@ import { afterAll, beforeAll, describe, expect, test } from '@jest/globals';
 import request from 'supertest';
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
-import net from 'node:net';
 
 process.env.NODE_ENV = 'test';
+// Isolate this suite while both app instances share the same namespace.
+process.env.RATE_LIMIT_KEY_NAMESPACE = `jest-two-instance-${process.pid}-${Date.now()}`;
 process.env.SESSION_SECRET = process.env.SESSION_SECRET || 'test-session-secret-not-for-production';
 // Keep FRONTEND_URL same-site localhost so session cookies are not Secure-only in HTTP tests.
 process.env.FRONTEND_URL = 'http://localhost:5173';
 process.env.REDIS_URL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
 process.env.TRUST_PROXY_HOPS = process.env.TRUST_PROXY_HOPS || '0';
-process.env.MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/maziwa_smart_v2_session_accept';
 
-const CANDIDATE_URI = process.env.TEST_MONGO_URI
-  || process.env.MONGO_URI
-  || 'mongodb://127.0.0.1:27017/maziwa_smart_v2_session_accept';
+const SUITE_DB = 'maziwa_smart_v2_session_accept';
 
 let memoryServer = null;
 let createApp = null;
@@ -29,38 +27,13 @@ let appB = null;
 let multiInstanceReady = false;
 let skipReason = 'not initialized';
 
-function parseMongoHostPort(uri) {
-  try {
-    const u = new URL(uri.replace('mongodb://', 'http://').replace('mongodb+srv://', 'http://'));
-    return { host: u.hostname || '127.0.0.1', port: Number(u.port || 27017) };
-  } catch {
-    return { host: '127.0.0.1', port: 27017 };
-  }
-}
-
-async function canConnectTcp(host, port, timeoutMs = 800) {
-  return new Promise((resolve) => {
-    const socket = net.connect({ host, port });
-    const done = (ok) => {
-      try { socket.destroy(); } catch { /* ignore */ }
-      resolve(ok);
-    };
-    socket.setTimeout(timeoutMs);
-    socket.on('connect', () => done(true));
-    socket.on('timeout', () => done(false));
-    socket.on('error', () => done(false));
-  });
-}
-
 async function resolveMongoUri() {
-  const { host, port } = parseMongoHostPort(CANDIDATE_URI);
-  if (await canConnectTcp(host, port)) return CANDIDATE_URI;
   try {
     const { MongoMemoryServer } = await import('mongodb-memory-server');
     memoryServer = await MongoMemoryServer.create();
-    return memoryServer.getUri('maziwa_smart_v2_session_accept');
+    return memoryServer.getUri(SUITE_DB);
   } catch (error) {
-    skipReason = `no reachable MongoDB and mongodb-memory-server unavailable (${error.message})`;
+    skipReason = `MongoMemoryServer unavailable (${error.message})`;
     return null;
   }
 }
@@ -140,8 +113,20 @@ describe('two-instance shared Mongo session store', () => {
       if (accountId && Account) {
         await Account.deleteOne({ _id: accountId }).catch(() => {});
       }
-      if (mongoose.connection.readyState === 1) {
-        await mongoose.connection.dropDatabase().catch(() => {});
+
+      // Close both connect-mongo stores before disconnecting Mongoose.
+      try {
+        const { disposeAppResources } = await import('../../src/app.js');
+        if (appA) await disposeAppResources(appA);
+        if (appB) await disposeAppResources(appB);
+      } catch (error) {
+        console.warn(
+          '[two-instance-session] Session-store teardown warning:',
+          error?.message || error
+        );
+      }
+
+      if (mongoose.connection.readyState !== 0) {
         await mongoose.disconnect().catch(() => {});
       }
     } finally {

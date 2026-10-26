@@ -1,3 +1,4 @@
+import { disconnectAccountSockets } from '../../realtime/socket.js';
 import crypto from 'node:crypto';
 import { Account } from './model.js';
 import { env, isProduction, isCrossSiteFrontend } from '../../config/environment.js';
@@ -116,8 +117,12 @@ export async function login(req, res) {
 
 export async function logout(req, res) {
   try {
+    const accountId = req.session?.userId || req.account?._id;
     await destroySession(req);
     res.clearCookie('connect.sid', cookieOptions());
+    if (accountId) {
+      try { disconnectAccountSockets(accountId); } catch { /* best-effort */ }
+    }
     return res.json({ success: true, message: 'Logged out successfully.' });
   } catch (error) {
     throw error;

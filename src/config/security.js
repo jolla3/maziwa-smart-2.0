@@ -2,6 +2,7 @@
 import helmet from 'helmet';
 import cors from 'cors';
 import { env, isProduction } from './environment.js';
+import { AppError } from '../shared/errors/AppError.js';
 
 export function normalizeOrigin(url) {
   if (!url || typeof url !== 'string') return '';
@@ -33,7 +34,7 @@ export const corsMiddleware = cors({
   origin(origin, callback) {
     if (!origin) return callback(null, true);
     if (isAllowedOrigin(origin)) return callback(null, true);
-    return callback(new Error(`CORS blocked for origin: ${origin}`));
+    return callback(new AppError(403, 'FORBIDDEN', 'Origin not allowed'));
   },
   credentials: true,
   methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],

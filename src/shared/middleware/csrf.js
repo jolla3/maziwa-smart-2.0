@@ -1,16 +1,14 @@
-// src/middlewares/csrf.js
+// src/shared/middleware/csrf.js
 //
-// Cookie session auth across different frontend/API hosts cannot rely only
-// on double-submit via document.cookie — the browser will not expose the
-// API-domain csrf-token cookie to SPA JavaScript on another origin.
+// Cookie session + CSRF for browser clients.
 //
 // Protection model:
-//   1. Cross-origin browser requests always send Origin. We require Origin
-//      to be in FRONTEND_URL (env). Attackers cannot forge Origin.
-//   2. When the client *can* send X-CSRF-Token (same-origin or after
-//      reading the exposed response header), it must match the cookie.
+//   1. Cross-origin browser requests send Origin; it must be allowlisted.
+//   2. Unsafe methods require double-submit: csrf-token cookie AND matching
+//      X-CSRF-Token header. An allowlisted Origin alone is not sufficient.
 //   3. Login/signup remain exempt (no session yet to forge).
 //   4. Webhooks never hit this middleware (mounted separately).
+//   5. GET/HEAD/OPTIONS remain safe and issue the CSRF cookie for later use.
 
 import crypto from 'crypto';
 import { isProduction, isCrossSiteFrontend } from '../../config/environment.js';
@@ -35,14 +33,11 @@ function ensureCsrfToken(req, res) {
       path: '/',
     });
   }
-  // Always expose so a cross-origin SPA can store and echo the value.
   res.setHeader('X-CSRF-Token', token);
   return token;
 }
 
 export function issueCsrfCookie(req, res, next) {
-  // Public probes must not Set-Cookie — Chrome Tracking Prevention can
-  // block third-party fetches whose responses try to set cookies (blocked:other).
   const p = req.path || '';
   if (p === '/health' || p === '/ready' || p.endsWith('/health') || p.endsWith('/ready')) {
     return next();
@@ -59,29 +54,22 @@ export function csrfProtection(req, res, next) {
   const headerToken = req.headers['x-csrf-token'];
   const origin = req.headers.origin;
 
-  // Prefer strict double-submit when the client sent the header.
-  if (cookieToken && headerToken) {
-    if (cookieToken === headerToken) return next();
+  // Disallowed Origin is always rejected for unsafe methods when Origin is present.
+  if (origin && !isAllowedOrigin(origin)) {
+    return apiResponse.error(res, 'FORBIDDEN', 'Origin not allowed', 403);
+  }
+
+  // Double-submit required for all non-exempt unsafe methods.
+  // Allowlisted Origin is necessary for cross-origin browsers but never sufficient alone.
+  if (!cookieToken || !headerToken) {
+    // issueCsrfCookie runs before route-level CSRF protection and has already
+    // primed a missing cookie. Do not issue a second token here.
     return apiResponse.error(res, 'FORBIDDEN', 'CSRF token missing or invalid', 403);
   }
 
-  // Cross-origin SPA: browser sends Origin; it cannot be forged by a script.
-  // Require an allowlisted Origin and a CSRF cookie (set on a prior response).
-  if (origin) {
-    if (!isAllowedOrigin(origin)) {
-      return apiResponse.error(res, 'FORBIDDEN', 'Origin not allowed', 403);
-    }
-    if (!cookieToken) {
-      // Prime cookie for the next attempt; still reject this mutation.
-      ensureCsrfToken(req, res);
-      return apiResponse.error(res, 'FORBIDDEN', 'CSRF token missing or invalid', 403);
-    }
-    return next();
-  }
-
-  // No Origin (same-site navigation or non-browser): require double-submit.
-  if (!cookieToken || !headerToken || cookieToken !== headerToken) {
+  if (cookieToken !== headerToken) {
     return apiResponse.error(res, 'FORBIDDEN', 'CSRF token missing or invalid', 403);
   }
-  next();
+
+  return next();
 }

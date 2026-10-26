@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@getbrevo/brevo": "^3.0.1",
+    "@socket.io/redis-adapter": "^8.3.0",
     "bcryptjs": "^3.0.2",
     "cloudinary": "^2.5.1",
     "connect-mongo": "^5.1.0",
@@ -31,11 +32,13 @@
     "passport": "^0.7.0",
     "passport-google-oauth20": "^2.0.0",
     "pino": "^9.4.0",
-    "pino-pretty": "^11.2.2"
+    "pino-pretty": "^11.2.2",
+    "socket.io": "^4.8.4"
   },
   "devDependencies": {
     "jest": "^29.7.0",
     "mongodb-memory-server": "^11.3.0",
+    "socket.io-client": "^4.8.4",
     "supertest": "^7.0.0"
   },
   "jest": {
